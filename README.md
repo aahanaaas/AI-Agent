@@ -39,6 +39,12 @@ The manifest type is auto-detected; override with `manifest_type` (pypi, npm, ca
 
 **Test:** with the server running, `python smoke_test.py` runs a quick check. `--full` adds npm, `--all` adds Rust, Go, Java, Ruby, PHP and `auto_compare` (uses more SerpApi credits).
 
+## Deploy on Render
+
+This repository includes a `render.yaml` Blueprint for the FastAPI backend. In Render, create a new Blueprint Instance from this repository and provide `SERPAPI_KEY` and `GEMINI_API_KEY` when prompted. Keep these keys in Render's environment settings; never commit real credentials.
+
+After deployment, check `/health` and open `/docs` on the service URL. The SQLite cache and audit history are stored in `doctor.db`; on Render's default ephemeral filesystem, that local state may be lost when the service restarts or redeploys.
+
 ## Endpoints
 
 - `POST /audit` - health report + action plan (keep / update / replace / monitor). `"auto_compare": true` also compares the top "replace" library with its alternative.
