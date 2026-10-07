@@ -622,7 +622,7 @@
 
 .profile-setting-row--password {
   gap: clamp(28px, 5vw, 64px);
-  margin-bottom: 37px;
+  margin-bottom: 22px;
 }
 
 .profile-password-value {
@@ -652,7 +652,7 @@
 
 .password-changed {
   color: #1c1a19;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 600;
   line-height: 16px;
   text-align: center;
