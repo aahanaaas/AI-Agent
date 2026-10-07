@@ -27,9 +27,7 @@ createRoot(rootElement).render(
         )}
       </ClerkProvider>
     ) : (
-      <main className="flex min-h-screen items-center justify-center bg-white p-8 font-sans text-gray-950">
-        <p>Authentication is not configured. Set VITE_CLERK_PUBLISHABLE_KEY and restart the app.</p>
-      </main>
+      <Root isClerkEnabled={false} />
     )}
   </StrictMode>,
 )

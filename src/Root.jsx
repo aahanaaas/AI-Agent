@@ -3,9 +3,8 @@ import { useState } from 'react'
 import App from './App.jsx'
 import Login from './pages/Login.jsx'
 
-export default function Root() {
+function ClerkRoot({ isGuest, setIsGuest }) {
   const { isLoaded, isSignedIn } = useAuth()
-  const [isGuest, setIsGuest] = useState(false)
 
   if (!isLoaded) {
     return (
@@ -17,11 +16,15 @@ export default function Root() {
 
   if (isSignedIn || isGuest) return <App />
 
-  return (
-    <Login
-      onGuest={() => {
-        setIsGuest(true)
-      }}
-    />
-  )
+  return <Login onGuest={() => setIsGuest(true)} isClerkEnabled />
+}
+
+export default function Root({ isClerkEnabled = true }) {
+  const [isGuest, setIsGuest] = useState(false)
+
+  if (!isClerkEnabled) {
+    return isGuest ? <App /> : <Login onGuest={() => setIsGuest(true)} isClerkEnabled={false} />
+  }
+
+  return <ClerkRoot isGuest={isGuest} setIsGuest={setIsGuest} />
 }

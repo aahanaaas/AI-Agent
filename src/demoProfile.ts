@@ -3,7 +3,7 @@ export const DEMO_PROFILE = {
   email: "username@example.com",
   phone: "+91 XXXXX XXXXX",
   passwordMask: "••••••••",
-  passwordChanged: "—",
+  passwordChanged: "4 Oct",
   origin: "India",
 } as const;
 
