@@ -664,6 +664,7 @@
 
 .theme-picker {
   position: relative;
+  transform: translateX(12px);
 }
 
 .theme-trigger {
@@ -726,6 +727,7 @@
 
 .chat-color-picker {
   position: relative;
+  transform: translateX(12px);
 }
 
 .chat-color-trigger {
