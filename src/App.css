@@ -356,11 +356,11 @@
 
 .screen--profile,
 .app-shell:has(.screen--profile) {
-  background: #f7f4eb;
+  background: #f5f1e6;
 }
 
 .screen--profile .profile-screen {
-  background: #f7f4eb;
+  background: #f5f1e6;
 }
 
 .screen--profile .menu-button {
@@ -664,7 +664,7 @@
 
 .theme-picker {
   position: relative;
-  transform: translateX(12px);
+  transform: translateX(-8px);
 }
 
 .theme-trigger {
@@ -727,7 +727,7 @@
 
 .chat-color-picker {
   position: relative;
-  transform: translateX(12px);
+  transform: translateX(-8px);
 }
 
 .chat-color-trigger {

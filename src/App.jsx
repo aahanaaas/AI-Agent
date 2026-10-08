@@ -47,6 +47,7 @@ export function App({ onSearch, userName } = {}) {
   const [editingProfileField, setEditingProfileField] = useState(/** @type {ProfileField | ''} */ (''))
   const [profileDraft, setProfileDraft] = useState('')
   const [query, setQuery] = useState('')
+  const [searchResult, setSearchResult] = useState('')
   const [isBusy, setIsBusy] = useState(false)
   const [isListening, setIsListening] = useState(false)
   const [error, setError] = useState('')
@@ -123,11 +124,67 @@ export function App({ onSearch, userName } = {}) {
     busyRef.current = true
     setIsBusy(true)
     setError('')
+    setSearchResult('')
 
     try {
-      await onSearch?.(trimmedQuery)
-    } catch {
-      setError('Search failed. Check your connection and try again.')
+      if (onSearch) {
+        await onSearch(trimmedQuery)
+        return
+      }
+
+      const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/+$/, '')
+      if (!configuredApiBaseUrl) {
+        throw new Error('VITE_API_BASE_URL is not configured.')
+      }
+
+      const auditUrl = import.meta.env.DEV
+        ? '/api/audit'
+        : `${configuredApiBaseUrl}/audit`
+      const response = await fetch(auditUrl, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          manifest: trimmedQuery,
+          manifest_type: 'auto',
+          goal: '',
+          auto_compare: false,
+        }),
+      })
+
+      let result
+      try {
+        result = await response.json()
+      } catch {
+        throw new Error(`The backend returned an unreadable response (HTTP ${response.status}).`)
+      }
+
+      if (!response.ok) {
+        const detail = result?.detail
+        const message = Array.isArray(detail)
+          ? detail.map((item) => item.msg).filter(Boolean).join('; ')
+          : typeof detail === 'string'
+            ? detail
+            : `The request failed (HTTP ${response.status}).`
+        throw new Error(message)
+      }
+
+      const dependencies = Array.isArray(result.dependencies) ? result.dependencies : []
+      const summary = result.summary || {}
+      const risks = `${summary.high ?? 0} high-risk, ${summary.medium ?? 0} medium-risk, ${summary.low ?? 0} low-risk`
+      setSearchResult(`${dependencies.length} dependencies checked · ${risks}`)
+    } catch (searchError) {
+      setError(
+        searchError instanceof TypeError
+          ? import.meta.env.DEV
+            ? 'Could not reach the backend. Check that the Render API is available and restart the dev server.'
+            : 'Could not reach the backend. Check the API URL, network, and backend CORS configuration.'
+          : searchError instanceof Error
+            ? searchError.message
+            : 'Search failed unexpectedly.',
+      )
     } finally {
       busyRef.current = false
       setIsBusy(false)
@@ -480,9 +537,9 @@ export function App({ onSearch, userName } = {}) {
                 </button>
               </div>
             </form>
-            {(isBusy || isListening || error) && (
+            {(isBusy || isListening || error || searchResult) && (
               <p className="search-status" role="status">
-                {isBusy ? 'Searching…' : isListening ? 'Listening…' : error}
+                {isBusy ? 'Searching…' : isListening ? 'Listening…' : error || searchResult}
               </p>
             )}
           </main>
