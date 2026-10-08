@@ -34,6 +34,7 @@ _load_env()
 import httpx
 import serpapi  # official SerpApi Python SDK
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 try:
@@ -58,6 +59,20 @@ db.execute("CREATE TABLE IF NOT EXISTS cache(k TEXT PRIMARY KEY, v TEXT, ts REAL
 db.execute("CREATE TABLE IF NOT EXISTS audits(id INTEGER PRIMARY KEY, project TEXT, ts REAL, levels TEXT)")
 
 app = FastAPI(title="Dependency Doctor")
+allowed_origins = [
+    origin.strip()
+    for origin in os.getenv(
+        "FRONTEND_ORIGINS", "http://localhost:3000,http://localhost:5173"
+    ).split(",")
+    if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 llm = None  # only used for the optional Anthropic provider
 
 

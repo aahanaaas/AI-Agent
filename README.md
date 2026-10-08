@@ -45,6 +45,8 @@ This repository includes a `render.yaml` Blueprint for the FastAPI backend. In R
 
 After deployment, check `/health` and open `/docs` on the service URL. The SQLite cache and audit history are stored in `doctor.db`; on Render's default ephemeral filesystem, that local state may be lost when the service restarts or redeploys.
 
+For a browser frontend hosted on a different domain, set `FRONTEND_ORIGINS` in Render's environment settings to its exact origin, including the scheme and any non-default port (for example, `https://my-app.example.com`). For multiple allowed frontend origins, separate them with commas. Local development allows `http://localhost:3000` and `http://localhost:5173` by default. Redeploy after changing this setting.
+
 ## Endpoints
 
 - `POST /audit` - health report + action plan (keep / update / replace / monitor). `"auto_compare": true` also compares the top "replace" library with its alternative.
