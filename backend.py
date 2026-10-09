@@ -13,7 +13,8 @@ Keys: put them in a local .env file (never commit it) or export them as environm
 import os, re, json, time, hashlib, sqlite3, asyncio
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote
+from html.parser import HTMLParser
+from urllib.parse import quote, urlparse
 
 
 # ---------- tiny .env loader (no extra dependency). Real env vars win over .env ----------
@@ -32,7 +33,11 @@ def _load_env(path=".env"):
 _load_env()
 
 import httpx
-import serpapi  # official SerpApi Python SDK
+try:
+    import serpapi  # type: ignore[import-not-found]  # official SerpApi Python SDK
+except ImportError:  # Optional dependency: the app can still start, but SerpApi-backed features fail clearly.
+    serpapi = None
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -53,6 +58,21 @@ OSV_ECO = {"pypi": "PyPI", "npm": "npm", "cargo": "crates.io", "go": "Go",
 DEPSDEV = {"npm": "npm", "cargo": "cargo", "go": "go", "maven": "maven"}
 LABEL = {"pypi": "python", "npm": "npm javascript", "cargo": "rust crate", "go": "go module",
          "rubygems": "ruby gem", "packagist": "php composer", "maven": "java maven"}
+REPUTABLE_SOURCE_HOSTS = {
+    "apnews.com", "bbc.com", "bbc.co.uk", "bmj.com", "britannica.com", "cochranelibrary.com",
+    "ft.com", "jamanetwork.com", "nature.com", "nejm.org", "npr.org", "nytimes.com",
+    "ourworldindata.org", "reuters.com", "science.org", "theguardian.com",
+}
+FASTAPI_FLASK_DOCS = (
+    {"title": "FastAPI - Async: Concurrency and async/await",
+     "link": "https://fastapi.tiangolo.com/async/"},
+    {"title": "FastAPI - Benchmarks",
+     "link": "https://fastapi.tiangolo.com/benchmarks/"},
+    {"title": "Flask - Using async and await",
+     "link": "https://flask.palletsprojects.com/en/stable/async-await/"},
+    {"title": "Flask - Design Decisions",
+     "link": "https://flask.palletsprojects.com/en/stable/design/"},
+)
 
 db = sqlite3.connect("doctor.db", check_same_thread=False)
 db.execute("CREATE TABLE IF NOT EXISTS cache(k TEXT PRIMARY KEY, v TEXT, ts REAL)")
@@ -88,6 +108,18 @@ class CompareReq(BaseModel):
     lib_b: str
     ecosystem: str = "pypi"
     use_case: str = "general purpose project"
+
+
+class AskReq(BaseModel):
+    question: str
+
+
+def require_serpapi():
+    if serpapi is None:
+        raise HTTPException(
+            503,
+            "The SerpApi Python SDK is not installed. Install dependencies from requirements.txt.",
+        )
 
 
 # ---------- Manifest parsing ----------
@@ -175,10 +207,10 @@ def _serp_sync(engine, q, extra):
     return res.as_dict()
 
 
-async def serp(client, sem, ctx, engine, q, **extra):
+async def serp(client, sem, ctx, engine, q, *, fresh=False, **extra):
     key = hashlib.sha1(json.dumps([engine, q, extra], sort_keys=True).encode()).hexdigest()
     row = db.execute("SELECT v, ts FROM cache WHERE k=?", (key,)).fetchone()
-    if row and time.time() - row[1] < CACHE_TTL:
+    if not fresh and row and time.time() - row[1] < CACHE_TTL:
         ctx["cache_hits"] += 1
         return json.loads(row[0])
     if ctx["credits"] >= MAX_CREDITS:
@@ -333,57 +365,258 @@ def norm(s: str) -> str:
     return re.sub(r"\W+", " ", s.lower()).strip()
 
 
+class _DocText(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.skip_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style", "nav", "header", "footer", "svg", "noscript"}:
+            self.skip_depth += 1
+        elif not self.skip_depth and tag in {"p", "li", "h1", "h2", "h3", "pre"}:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in {"script", "style", "nav", "header", "footer", "svg", "noscript"} and self.skip_depth:
+            self.skip_depth -= 1
+        elif not self.skip_depth and tag in {"p", "li", "h1", "h2", "h3", "pre"}:
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        if not self.skip_depth:
+            self.parts.append(data)
+
+
+def official_doc_excerpt(html: str, max_chars=1400):
+    parser = _DocText()
+    parser.feed(html)
+    blocks = [re.sub(r"\s+", " ", block).strip() for block in "".join(parser.parts).splitlines()]
+    blocks = [block for block in blocks if len(block) > 35]
+    relevant = re.compile(
+        r"\b(async|await|concurren|worker|request|io.bound|cpu.bound|wsgi|asgi|"
+        r"performance|benchmark|validation|serializ|automatic|background task)\b", re.I)
+    selected, size = [], 0
+    for block in blocks:
+        if relevant.search(block) and block not in selected:
+            if selected and size + len(block) > max_chars:
+                break
+            selected.append(block)
+            size += len(block)
+    return " ".join(selected)
+
+
+def display_sources(sources):
+    visible = []
+    for source in sources:
+        link = source.get("link", "")
+        title = source.get("title") or link
+        if link and link not in title:
+            title = f"{title} — {link}"
+        visible.append({key: value for key, value in source.items() if key != "snippet"} | {"title": title})
+    return visible
+
+
+async def fetch_official_docs(client, docs):
+    async def fetch(doc):
+        try:
+            response = await client.get(doc["link"], timeout=20, follow_redirects=True)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            return {**doc, "snippet": "", "error": str(exc)}
+        if urlparse(str(response.url)).hostname != urlparse(doc["link"]).hostname:
+            return {**doc, "snippet": "", "error": "Official documentation redirected to an unexpected host"}
+        return {**doc, "snippet": official_doc_excerpt(response.text)}
+
+    return await asyncio.gather(*(fetch(doc) for doc in docs))
+
+
+def source_authority(link: str, question: str):
+    parsed = urlparse(link)
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    if parsed.scheme != "https" or not host:
+        return None
+    labels = host.split(".")
+    if (host.endswith((".gov", ".gov.uk", ".gov.in", ".edu", ".edu.au", ".int"))
+            or host in {"who.int", "un.org", "europa.eu", "iso.org", "w3.org", "ietf.org"}):
+        return "Official / primary"
+    ignored = {"about", "after", "before", "best", "does", "explain", "find", "from",
+               "give", "help", "how", "into", "latest", "more", "most", "need", "please",
+               "should", "tell", "that", "their", "there", "these", "this", "through",
+               "using", "what", "when", "where", "which", "while", "with", "would"}
+    terms = {t for t in re.findall(r"[a-z0-9]+", question.lower()) if len(t) >= 4 and t not in ignored}
+    host_terms = set(labels[:-1])
+    if any(term in host_terms or any(len(term) >= 5 and term in label for label in host_terms)
+           for term in terms) and host not in {"github.com", "medium.com", "wikipedia.org"}:
+        return "Official / primary"
+    if any(host == trusted or host.endswith("." + trusted) for trusted in REPUTABLE_SOURCE_HOSTS):
+        return "Reputable secondary"
+    return None
+
+
 def new_ctx():
     return {"credits": 0, "cache_hits": 0, "tokens_in": 0, "tokens_out": 0, "trace": []}
 
 
 # ---------- Compare engine (used by /compare and by audit auto_compare) ----------
 async def run_compare(client, sem, ctx, a, b, use_case, eco="pypi"):
+    framework_compare = eco == "pypi" and {short(a).casefold(), short(b).casefold()} == {"fastapi", "flask"}
+    query = f"{short(a)} vs {short(b)} {LABEL[eco]} {use_case}"
     fa, fb, web = await asyncio.gather(
         facts(client, {"name": a.lower() if eco == "pypi" else a, "eco": eco}),
         facts(client, {"name": b.lower() if eco == "pypi" else b, "eco": eco}),
-        serp(client, sem, ctx, "google", f"{short(a)} vs {short(b)} {LABEL[eco]} {use_case}", num=6))
+        fetch_official_docs(client, FASTAPI_FLASK_DOCS) if framework_compare else
+        serp(client, sem, ctx, "google", query, num=6))
     src = {}
-    for o in (web.get("organic_results") or [])[:5]:
-        sid = f"S{len(src) + 1}"
-        src[sid] = {"id": sid, "title": o.get("title", ""), "link": o.get("link"),
-                    "date": o.get("date"), "snippet": o.get("snippet", "")}
-    if not src:
+    if framework_compare:
+        for doc in web:
+            if doc["snippet"]:
+                sid = f"S{len(src) + 1}"
+                src[sid] = {"id": sid, "title": doc["title"], "link": doc["link"],
+                            "date": "Retrieved " + datetime.now(timezone.utc).date().isoformat(),
+                            "snippet": doc["snippet"]}
+    else:
+        for o in (web.get("organic_results") or [])[:5]:
+            sid = f"S{len(src) + 1}"
+            src[sid] = {"id": sid, "title": o.get("title", ""), "link": o.get("link"),
+                        "date": o.get("date"), "snippet": o.get("snippet", "")}
+    if not src and not framework_compare:
         return {"error": "no search results"}
-    packed = "\n".join(f"[{s['id']}] {s['title']} | {s['snippet']}" for s in src.values())
+    grounded_sources = [s for s in src.values() if s["snippet"]]
+    packed = "\n".join(f"[{s['id']}] {s['title']} | {s['snippet']}" for s in grounded_sources)
+    if not packed:
+        return {"verdict": {"winner": "", "reason": "The official documentation could not be reached, "
+                            "so I can't make a current evidence-based comparison. The official links are "
+                            "included below; retry after the documentation sites are reachable.",
+                            "flips_if": "", "confidence": "low"},
+                "registry_facts": {a: fa, b: fb}, "claims": [], "rejected_claims": 0,
+                "sources": display_sources(
+                    [{"id": f"S{i}", "title": doc["title"], "link": doc["link"], "date": None}
+                     for i, doc in enumerate(FASTAPI_FLASK_DOCS, 1)])}
     out = await ask(ctx,
                     'Return ONLY JSON: {"claims":[{"lib":"","text":"","source_id":"S1","quote":""}],'
                     '"verdict":{"winner":"","reason":"","flips_if":"","confidence":"low|medium|high"}}. '
                     "Use only the given sources and registry facts. quote must be copied word-for-word "
-                    "from that source's snippet. flips_if = when the other library is the better pick.",
+                    "from that source's snippet. flips_if = when the other library is the better pick. "
+                    "For FastAPI-versus-Flask comparisons, answer the trade-offs directly and give a "
+                    "conditional recommendation for the stated use case. FastAPI is the likely fit when "
+                    "many concurrent I/O-bound requests and async-first APIs are central; Flask remains "
+                    "reasonable when simplicity, existing Flask expertise, or synchronous workloads matter. "
+                    "Explain that async does not make CPU-bound work faster and avoid unsupported universal "
+                    "speed/RPS claims. Use only the supplied official documentation excerpts.",
                     f"Ecosystem: {LABEL[eco]}\nUse case: {use_case}\nA={a} facts={json.dumps(fa)}\n"
                     f"B={b} facts={json.dumps(fb)}\nSources:\n{packed}")
     claims = out.get("claims", [])
     kept = []
+    grounded_ids = {s["id"] for s in grounded_sources}
     for c in claims:  # grounding check: quote must really exist in the source
         s = src.get(c.get("source_id"))
-        if s and c.get("quote") and norm(c["quote"]) in norm(s["title"] + " " + s["snippet"]):
+        if (s and c.get("source_id") in grounded_ids and c.get("quote")
+                and norm(c["quote"]) in norm(s["title"] + " " + s["snippet"])):
             c["link"] = s["link"]
             kept.append(c)
     verdict = out.get("verdict", {})
     if claims and len(kept) / len(claims) < 0.6:
         verdict["confidence"] = "low"  # too many unsupported claims
     return {"verdict": verdict, "registry_facts": {a: fa, b: fb}, "claims": kept,
-            "rejected_claims": len(claims) - len(kept), "sources": list(src.values())}
+            "rejected_claims": len(claims) - len(kept), "sources": display_sources(src.values())}
 
 
 @app.post("/compare")
 async def compare(req: CompareReq):
-    if not os.getenv("SERPAPI_KEY"):
-        raise HTTPException(500, "SERPAPI_KEY missing")
     if req.ecosystem not in OSV_ECO:
         raise HTTPException(400, f"ecosystem must be one of {list(OSV_ECO)}")
+    needs_search = (req.ecosystem != "pypi"
+                    or {short(req.lib_a).casefold(), short(req.lib_b).casefold()} != {"fastapi", "flask"})
+    if needs_search:
+        if not os.getenv("SERPAPI_KEY"):
+            raise HTTPException(500, "SERPAPI_KEY missing")
+        require_serpapi()
     ctx = new_ctx()
     async with httpx.AsyncClient() as client:
         res = await run_compare(client, asyncio.Semaphore(5), ctx, req.lib_a.strip(),
                                 req.lib_b.strip(), req.use_case, req.ecosystem)
     res["cost"] = {k: ctx[k] for k in ("credits", "cache_hits", "tokens_in", "tokens_out")}
     return res
+
+
+@app.post("/ask")
+async def answer_question(req: AskReq):
+    question = req.question.strip()
+    if not question or len(question) > 2000:
+        raise HTTPException(400, "Question must contain 1 to 2000 characters")
+    if not os.getenv("SERPAPI_KEY"):
+        raise HTTPException(500, "SERPAPI_KEY missing")
+    require_serpapi()
+
+    ctx = new_ctx()
+    async with httpx.AsyncClient() as client:
+        results = await serp(client, asyncio.Semaphore(5), ctx, "google", question, fresh=True, num=10)
+
+    sources = []
+    for result in results.get("organic_results") or []:
+        link = result.get("link", "")
+        authority = source_authority(link, question)
+        if not authority:
+            continue
+        sources.append({
+            "id": f"S{len(sources) + 1}",
+            "title": result.get("title", ""),
+            "link": link,
+            "date": result.get("date"),
+            "snippet": result.get("snippet", ""),
+            "authority": authority,
+        })
+    sources.sort(key=lambda source: source["authority"] != "Official / primary")
+    sources = sources[:8]
+    retrieved_at = datetime.now(timezone.utc).isoformat()
+    grounded_sources = [source for source in sources if source["snippet"]]
+    if not grounded_sources:
+        return {
+            "claims": [],
+            "confidence": "low",
+            "message": "I couldn't find current official or recognized reputable sources with verifiable excerpts, so I can't provide a sourced answer.",
+            "sources": display_sources(sources),
+            "retrieved_at": retrieved_at,
+        }
+
+    packed = "\n".join(
+        f"[{source['id']}] {source['authority']} | {source['title']} | "
+        f"{source['link']} | Published: {source['date'] or 'date not provided'} | {source['snippet']}"
+        for source in grounded_sources
+    )
+    out = await ask(
+        ctx,
+        'Return ONLY JSON: {"claims":[{"text":"","citations":[{"source_id":"S1","quote":""}]}],'
+        '"confidence":"low|medium|high"}. Answer the user\'s question using only the provided sources. '
+        "Prefer official or primary sources; use reputable secondary sources only when needed. "
+        "Every factual claim must have at least one citation whose quote is copied word-for-word from "
+        "that source's snippet. Do not use any outside knowledge, invent facts, dates, statistics, or URLs, "
+        "or claim something is current when the sources do not establish it. If sources do not support an "
+        "answer, return an empty claims array and low confidence. Preserve the user's language.",
+        f"Question: {question}\nCurrent UTC date: {retrieved_at}\nSources:\n{packed}",
+    )
+    source_by_id = {source["id"]: source for source in grounded_sources}
+    claims = []
+    for claim in out.get("claims", []):
+        citations = []
+        for citation in claim.get("citations", []):
+            source = source_by_id.get(citation.get("source_id"))
+            quote = citation.get("quote", "")
+            if source and quote and norm(quote) in norm(source["snippet"]):
+                citations.append({"source_id": source["id"], "quote": quote})
+        if citations and claim.get("text"):
+            claims.append({"text": claim["text"], "citations": citations})
+    confidence = out.get("confidence", "low")
+    if not claims or len(claims) < len(out.get("claims", [])):
+        confidence = "low"
+    return {
+        "claims": claims,
+        "confidence": confidence,
+        "message": "" if claims else "The available sources did not support a verifiable answer.",
+        "sources": display_sources(sources),
+        "retrieved_at": retrieved_at,
+    }
 
 
 @app.get("/")
@@ -404,6 +637,7 @@ def health():
 async def audit(req: AuditReq):
     if not os.getenv("SERPAPI_KEY"):
         raise HTTPException(500, "SERPAPI_KEY missing")
+    require_serpapi()
     deps_in = parse_manifest(req.manifest, req.manifest_type)
     if not deps_in:
         raise HTTPException(400, "No dependencies found")

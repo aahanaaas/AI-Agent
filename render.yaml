@@ -11,3 +11,5 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
+      - key: FRONTEND_ORIGINS
+        value: https://frontend-henna-kappa-19.vercel.app
