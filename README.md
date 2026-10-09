@@ -1,4 +1,4 @@
-# Dependency Doctor
+# IRIS
 
 One place for developers to check the health of their dependencies in 7 ecosystems, with every claim backed by an official source or a real search result.
 
